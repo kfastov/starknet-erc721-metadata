@@ -76,8 +76,6 @@ mod ERC721IPFSTemplate {
     use starknet::ContractAddress;
     use openzeppelin::token::erc721::ERC721;
     use alexandria_ascii::interger::ToAsciiTrait;
-    // use openzeppelin::introspection::src5::unsafe_state as src5_state;
-    // use openzeppelin::introspection::src5::SRC5;
     use openzeppelin::access::ownable::Ownable;
 
     use starknet::get_caller_address;
