@@ -66,6 +66,9 @@ trait IERC721IPFSTemplate<TContractState> {
     // and their camelCase equivalents
     fn maxSupply(self: @TContractState) -> u256;
     fn totalSupply(self: @TContractState) -> u256;
+    // method for setting base URI common for all tokens
+    // TODO move this into constructor
+    fn set_base_uri(ref self: TContractState, base_uri: Array<felt252>);
 }
 
 #[starknet::contract]
@@ -94,6 +97,8 @@ mod ERC721IPFSTemplate {
     struct Storage {
         max_supply: u256,
         last_token_id: u256,
+        base_uri_len: u32,
+        base_uri: LegacyMap<u32, felt252>
     }
 
     mod Errors {
@@ -177,9 +182,16 @@ mod ERC721IPFSTemplate {
 
         fn token_uri(self: @ContractState, token_id: u256) -> Array<felt252> {
             let mut uri = ArrayTrait::new();
-            uri.append(BASE_URI_PART1);
-            uri.append(BASE_URI_PART2);
-            uri.append(BASE_URI_PART3);
+
+            // retrieve base_uri from the storage and append to the uri string
+            let mut i = 0;
+            loop {
+                if i >= self.base_uri_len.read() {
+                    break;
+                }
+                uri.append(self.base_uri.read(i));
+                i += 1;
+            };
 
             let token_id_ascii = token_id.to_ascii();
 
@@ -376,6 +388,23 @@ mod ERC721IPFSTemplate {
         fn totalSupply(self: @ContractState) -> u256 {
             ERC721IPFSTemplateImpl::total_supply(self)
         }
+
+        fn set_base_uri(ref self: ContractState, base_uri: Array<felt252>) {
+            // check if sender is the owner of the contract
+            let unsafe_state = Ownable::unsafe_new_contract_state();
+            Ownable::InternalImpl::assert_only_owner(@unsafe_state);
+
+            let base_uri_len = base_uri.len();
+            let mut i = 0;
+            self.base_uri_len.write(base_uri_len);
+            loop {
+                if i >= base_uri.len() {
+                    break;
+                }
+                self.base_uri.write(i, *base_uri.at(i));
+                i += 1;
+            }
+        }
     }
 }
 
@@ -440,6 +469,14 @@ mod tests {
         set_contract_address(owner);
         let contract = deploy(owner, 'Token', 'T', 300);
 
+        // set the base URI
+        let base_uri = array![
+            'ipfs://lllllllllllllooooooooooo',
+            'nnnnnnnnnnngggggggggggggggggggg',
+            'aaaaddddddrrrrrreeeeeeesssss'
+        ];
+        contract.set_base_uri(base_uri.clone());
+
         let recipient = contract_address_const::<1>();
         contract.mint(recipient, 100);
         contract.mint(recipient, 50);
@@ -449,13 +486,13 @@ mod tests {
         assert(contract.owner_of(150) == recipient, 'wrong owner');
         let token_uri_array = contract.token_uri(150);
         assert(
-            *token_uri_array.at(0) == ERC721IPFSTemplate::BASE_URI_PART1, 'wrong token uri (part 1)'
+            *token_uri_array.at(0) == *base_uri.at(0), 'wrong token uri (part 1)'
         );
         assert(
-            *token_uri_array.at(1) == ERC721IPFSTemplate::BASE_URI_PART2, 'wrong token uri (part 2)'
+            *token_uri_array.at(1) == *base_uri.at(1), 'wrong token uri (part 2)'
         );
         assert(
-            *token_uri_array.at(2) == ERC721IPFSTemplate::BASE_URI_PART3, 'wrong token uri (part 3)'
+            *token_uri_array.at(2) == *base_uri.at(2), 'wrong token uri (part 3)'
         );
         assert(*token_uri_array.at(3) == '150', 'wrong token uri (token id)');
         assert(*token_uri_array.at(4) == '.json', 'wrong token uri (suffix)');
