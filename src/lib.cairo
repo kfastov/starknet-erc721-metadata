@@ -73,17 +73,6 @@ trait IERC721IPFSTemplate<TContractState> {
 
 #[starknet::contract]
 mod ERC721IPFSTemplate {
-    // I had to split the URI because the max length for 'short string' in Cairo is 31.
-    // The URI of individual tokens will be composed like this:
-    // BASE_URI_PART1 + BASE_URI_PART2 + BASE_URI_PART3 + (token_id) + BASE_URI_SUFFIX
-
-    //                             This line is exactly 31 chars long
-    //                              |------------------------------|
-    const BASE_URI_PART1: felt252 = 'ipfs://typicalverylongurilikey';
-    const BASE_URI_PART2: felt252 = 'oualwaysgetwithipfsandevenabit';
-    const BASE_URI_PART3: felt252 = 'longer/';
-    const BASE_URI_SUFFIX: felt252 = '.json';
-
     use starknet::ContractAddress;
     use openzeppelin::token::erc721::ERC721;
     use alexandria_ascii::interger::ToAsciiTrait;
