@@ -51,13 +51,6 @@ trait IERC721IPFSTemplate<TContractState> {
         tokenId: u256,
         data: Span<felt252>
     );
-    // Ownable implementation methods
-    fn owner(self: @TContractState) -> ContractAddress;
-    fn transfer_ownership(ref self: TContractState, new_owner: ContractAddress);
-    fn renounce_ownership(ref self: TContractState);
-    // and their camelCase equivalents
-    fn transferOwnership(ref self: TContractState, newOwner: ContractAddress);
-    fn renounceOwnership(ref self: TContractState);
     // Non-standard method for minting new NFTs. Can be called by admin only
     fn mint(ref self: TContractState, recipient: ContractAddress, amount: u256);
     // methods for retrieving supply
@@ -76,16 +69,26 @@ mod ERC721IPFSTemplate {
     use starknet::ContractAddress;
     use openzeppelin::token::erc721::ERC721;
     use alexandria_ascii::interger::ToAsciiTrait;
-    use openzeppelin::access::ownable::Ownable;
+    use openzeppelin::access::ownable::Ownable as ownable_component;
 
-    use starknet::get_caller_address;
+    component!(path: ownable_component, storage: ownable, event: OwnableEvent);
+
+    #[abi(embed_v0)]
+    impl OwnableImpl = ownable_component::OwnableImpl<ContractState>;
+    #[abi(embed_v0)]
+    impl OwnableCamelOnlyImpl =
+        ownable_component::OwnableCamelOnlyImpl<ContractState>;
+    impl InternalImpl = ownable_component::InternalImpl<ContractState>;
+
 
     #[storage]
     struct Storage {
         max_supply: u256,
         last_token_id: u256,
         base_uri_len: u32,
-        base_uri: LegacyMap<u32, felt252>
+        base_uri: LegacyMap<u32, felt252>,
+        #[substorage(v0)]
+        ownable: ownable_component::Storage
     }
 
     mod Errors {
@@ -100,7 +103,8 @@ mod ERC721IPFSTemplate {
         Transfer: Transfer,
         Approval: Approval,
         ApprovalForAll: ApprovalForAll,
-        OwnershipTransferred: OwnershipTransferred
+        #[flat]
+        OwnableEvent: ownable_component::Event
     }
 
     #[derive(Drop, starknet::Event)]
@@ -132,12 +136,6 @@ mod ERC721IPFSTemplate {
         approved: bool
     }
 
-    #[derive(Drop, starknet::Event)]
-    struct OwnershipTransferred {
-        previous_owner: ContractAddress,
-        new_owner: ContractAddress,
-    }
-
     #[constructor]
     fn constructor(
         ref self: ContractState,
@@ -151,8 +149,7 @@ mod ERC721IPFSTemplate {
         let mut unsafe_state = ERC721::unsafe_new_contract_state();
         ERC721::InternalImpl::initializer(ref unsafe_state, name, symbol);
 
-        let mut unsafe_state = Ownable::unsafe_new_contract_state();
-        Ownable::InternalImpl::initializer(ref unsafe_state, admin);
+        self.ownable.initializer(admin);
     }
 
     #[external(v0)]
@@ -306,36 +303,10 @@ mod ERC721IPFSTemplate {
             ERC721::ERC721CamelOnlyImpl::safeTransferFrom(ref unsafe_state, from, to, tokenId, data)
         }
 
-        fn owner(self: @ContractState) -> ContractAddress {
-            let unsafe_state = Ownable::unsafe_new_contract_state();
-            Ownable::OwnableImpl::owner(@unsafe_state)
-        }
-
-        fn transfer_ownership(ref self: ContractState, new_owner: ContractAddress) {
-            let mut unsafe_state = Ownable::unsafe_new_contract_state();
-            Ownable::OwnableImpl::transfer_ownership(ref unsafe_state, new_owner);
-        }
-
-        fn renounce_ownership(ref self: ContractState) {
-            let mut unsafe_state = Ownable::unsafe_new_contract_state();
-            Ownable::OwnableImpl::renounce_ownership(ref unsafe_state)
-        }
-
-        fn transferOwnership(ref self: ContractState, newOwner: ContractAddress) {
-            let mut unsafe_state = Ownable::unsafe_new_contract_state();
-            Ownable::OwnableCamelOnlyImpl::transferOwnership(ref unsafe_state, newOwner)
-        }
-
-        fn renounceOwnership(ref self: ContractState) {
-            let mut unsafe_state = Ownable::unsafe_new_contract_state();
-            Ownable::OwnableCamelOnlyImpl::renounceOwnership(ref unsafe_state)
-        }
-
         // Non-standard method for minting new NFTs. Can be called by admin only
         fn mint(ref self: ContractState, recipient: ContractAddress, amount: u256) {
             // check if sender is the owner of the contract
-            let unsafe_state = Ownable::unsafe_new_contract_state();
-            Ownable::InternalImpl::assert_only_owner(@unsafe_state);
+            self.ownable.assert_only_owner();
             assert(amount > 0, Errors::MINT_ZERO_AMOUNT);
             // check mint amount validity
             assert(amount <= super::MAX_MINT_AMOUNT, Errors::MINT_AMOUNT_TOO_LARGE);
@@ -378,8 +349,7 @@ mod ERC721IPFSTemplate {
 
         fn set_base_uri(ref self: ContractState, base_uri: Array<felt252>) {
             // check if sender is the owner of the contract
-            let unsafe_state = Ownable::unsafe_new_contract_state();
-            Ownable::InternalImpl::assert_only_owner(@unsafe_state);
+            self.ownable.assert_only_owner();
 
             let base_uri_len = base_uri.len();
             let mut i = 0;
@@ -405,7 +375,7 @@ mod tests {
     // Import the deploy syscall to be able to deploy the contract.
     use starknet::class_hash::Felt252TryIntoClassHash;
     use starknet::{
-        deploy_syscall, ContractAddress, get_caller_address, get_contract_address,
+        deploy_syscall, ContractAddress, get_contract_address,
         contract_address_const
     };
 
