@@ -67,12 +67,17 @@ trait IERC721IPFSTemplate<TContractState> {
 #[starknet::contract]
 mod ERC721IPFSTemplate {
     use starknet::ContractAddress;
+    use starknet::ClassHash;
     use openzeppelin::token::erc721::ERC721;
     use alexandria_ascii::integer::ToAsciiTrait;
     use openzeppelin::access::ownable::Ownable as ownable_component;
+    use openzeppelin::upgrades::upgradeable::Upgradeable as upgradeable_component;
+    use openzeppelin::upgrades::interface::IUpgradeable;
 
     component!(path: ownable_component, storage: ownable, event: OwnableEvent);
+    component!(path: upgradeable_component, storage: upgradeable, event: UpgradeableEvent);
 
+    /// Ownable
     #[abi(embed_v0)]
     impl OwnableImpl = ownable_component::OwnableImpl<ContractState>;
     #[abi(embed_v0)]
@@ -80,6 +85,8 @@ mod ERC721IPFSTemplate {
         ownable_component::OwnableCamelOnlyImpl<ContractState>;
     impl InternalImpl = ownable_component::InternalImpl<ContractState>;
 
+    /// Upgradeable
+    impl UpgradeableInternalImpl = upgradeable_component::InternalImpl<ContractState>;
 
     #[storage]
     struct Storage {
@@ -88,7 +95,9 @@ mod ERC721IPFSTemplate {
         base_uri_len: u32,
         base_uri: LegacyMap<u32, felt252>,
         #[substorage(v0)]
-        ownable: ownable_component::Storage
+        ownable: ownable_component::Storage,
+        #[substorage(v0)]
+        upgradeable: upgradeable_component::Storage
     }
 
     mod Errors {
@@ -104,7 +113,9 @@ mod ERC721IPFSTemplate {
         Approval: Approval,
         ApprovalForAll: ApprovalForAll,
         #[flat]
-        OwnableEvent: ownable_component::Event
+        OwnableEvent: ownable_component::Event,
+        #[flat]
+        UpgradeableEvent: upgradeable_component::Event,
     }
 
     #[derive(Drop, starknet::Event)]
@@ -150,6 +161,17 @@ mod ERC721IPFSTemplate {
         ERC721::InternalImpl::initializer(ref unsafe_state, name, symbol);
 
         self.ownable.initializer(admin);
+    }
+
+    #[external(v0)]
+    impl UpgradeableImpl of IUpgradeable<ContractState> {
+        fn upgrade(ref self: ContractState, new_class_hash: ClassHash) {
+            // This function can only be called by the owner
+            self.ownable.assert_only_owner();
+
+            // Replace the class hash upgrading the contract
+            self.upgradeable._upgrade(new_class_hash);
+        }
     }
 
     #[external(v0)]
@@ -372,12 +394,13 @@ mod tests {
         ERC721IPFSTemplate, IERC721IPFSTemplateDispatcher, IERC721IPFSTemplateDispatcherTrait
     };
     use openzeppelin::access::ownable::interface::{IOwnableDispatcher, IOwnableDispatcherTrait};
+    use openzeppelin::upgrades::interface::{IUpgradeableDispatcher, IUpgradeableDispatcherTrait};
 
     // Import the deploy syscall to be able to deploy the contract.
     use starknet::class_hash::Felt252TryIntoClassHash;
     use starknet::{
         deploy_syscall, ContractAddress, get_contract_address,
-        contract_address_const
+        contract_address_const, class_hash_const
     };
 
     // Use starknet test utils to fake the transaction context.
@@ -386,7 +409,7 @@ mod tests {
     // Deploy the contract and return its dispatcher.
     fn deploy(
         owner: ContractAddress, name: felt252, symbol: felt252, max_supply: u256
-    ) -> (IERC721IPFSTemplateDispatcher, IOwnableDispatcher) {
+    ) -> (IERC721IPFSTemplateDispatcher, IOwnableDispatcher, IUpgradeableDispatcher) {
         // Set up constructor arguments.
         let mut calldata = ArrayTrait::new();
         owner.serialize(ref calldata);
@@ -404,7 +427,8 @@ mod tests {
         // The dispatcher allows to interact with the contract based on its interface.
         (
             IERC721IPFSTemplateDispatcher { contract_address },
-            IOwnableDispatcher { contract_address }
+            IOwnableDispatcher { contract_address },
+            IUpgradeableDispatcher { contract_address }
         )
     }
 
@@ -415,7 +439,7 @@ mod tests {
         let name = 'Cool Token';
         let symbol = 'COOL';
         let max_supply = 100000;
-        let (contract, ownable) = deploy(owner, name, symbol, max_supply);
+        let (contract, ownable, _) = deploy(owner, name, symbol, max_supply);
 
         assert(contract.name() == name, 'wrong name');
         assert(contract.symbol() == symbol, 'wrong symbol');
@@ -429,7 +453,7 @@ mod tests {
     fn test_mint() {
         let owner = contract_address_const::<123>();
         set_contract_address(owner);
-        let (contract, _) = deploy(owner, 'Token', 'T', 300);
+        let (contract, _, _) = deploy(owner, 'Token', 'T', 300);
 
         // set the base URI
         let base_uri = array![
@@ -466,7 +490,7 @@ mod tests {
         let owner = contract_address_const::<123>();
         set_contract_address(owner);
 
-        let (contract, _) = deploy(owner, 'Token', 'T', 300);
+        let (contract, _, _) = deploy(owner, 'Token', 'T', 300);
 
         let recipient = contract_address_const::<1>();
         contract.mint(recipient, 300);
@@ -479,7 +503,7 @@ mod tests {
         let admin = contract_address_const::<1>();
         set_contract_address(admin);
 
-        let (contract, _) = deploy(admin, 'Token', 'T', 300);
+        let (contract, _, _) = deploy(admin, 'Token', 'T', 300);
 
         let not_admin = contract_address_const::<2>();
         set_contract_address(not_admin);
@@ -491,7 +515,21 @@ mod tests {
     #[should_panic]
     #[available_gas(2000000000)]
     fn test_mint_too_much() {
-        let (contract, _) = deploy(contract_address_const::<123>(), 'Token', 'T', 300);
+        let (contract, _, _) = deploy(contract_address_const::<123>(), 'Token', 'T', 300);
         contract.mint(get_contract_address(), 301);
+    }
+
+    #[test]
+    #[ignore]
+    #[available_gas(2000000000)]
+    fn test_can_upgrade() {
+        let owner = contract_address_const::<123>();
+        set_contract_address(owner);
+
+        let (contract, _, upgradeable) = deploy(owner, 'Token', 'T', 300);
+
+        // TODO make it work actually
+        let new_class_hash = class_hash_const::<234>();
+        upgradeable.upgrade(new_class_hash);
     }
 }
