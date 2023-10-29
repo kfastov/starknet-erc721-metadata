@@ -371,6 +371,7 @@ mod tests {
     use super::{
         ERC721IPFSTemplate, IERC721IPFSTemplateDispatcher, IERC721IPFSTemplateDispatcherTrait
     };
+    use openzeppelin::access::ownable::interface::{IOwnableDispatcher, IOwnableDispatcherTrait};
 
     // Import the deploy syscall to be able to deploy the contract.
     use starknet::class_hash::Felt252TryIntoClassHash;
@@ -385,7 +386,7 @@ mod tests {
     // Deploy the contract and return its dispatcher.
     fn deploy(
         owner: ContractAddress, name: felt252, symbol: felt252, max_supply: u256
-    ) -> IERC721IPFSTemplateDispatcher {
+    ) -> (IERC721IPFSTemplateDispatcher, IOwnableDispatcher) {
         // Set up constructor arguments.
         let mut calldata = ArrayTrait::new();
         owner.serialize(ref calldata);
@@ -399,9 +400,12 @@ mod tests {
         )
             .unwrap();
 
-        // Return the dispatcher.
+        // Return dispatchers.
         // The dispatcher allows to interact with the contract based on its interface.
-        IERC721IPFSTemplateDispatcher { contract_address }
+        (
+            IERC721IPFSTemplateDispatcher { contract_address },
+            IOwnableDispatcher { contract_address }
+        )
     }
 
     #[test]
@@ -411,12 +415,13 @@ mod tests {
         let name = 'Cool Token';
         let symbol = 'COOL';
         let max_supply = 100000;
-        let contract = deploy(owner, name, symbol, max_supply);
+        let (contract, ownable) = deploy(owner, name, symbol, max_supply);
 
         assert(contract.name() == name, 'wrong name');
         assert(contract.symbol() == symbol, 'wrong symbol');
         assert(contract.max_supply() == max_supply, 'wrong max supply');
-        assert(contract.owner() == owner, 'wrong admin');
+
+        assert(ownable.owner() == owner, 'wrong admin');
     }
 
     #[test]
@@ -424,7 +429,7 @@ mod tests {
     fn test_mint() {
         let owner = contract_address_const::<123>();
         set_contract_address(owner);
-        let contract = deploy(owner, 'Token', 'T', 300);
+        let (contract, _) = deploy(owner, 'Token', 'T', 300);
 
         // set the base URI
         let base_uri = array![
@@ -461,7 +466,7 @@ mod tests {
         let owner = contract_address_const::<123>();
         set_contract_address(owner);
 
-        let contract = deploy(owner, 'Token', 'T', 300);
+        let (contract, _) = deploy(owner, 'Token', 'T', 300);
 
         let recipient = contract_address_const::<1>();
         contract.mint(recipient, 300);
@@ -474,7 +479,7 @@ mod tests {
         let admin = contract_address_const::<1>();
         set_contract_address(admin);
 
-        let contract = deploy(admin, 'Token', 'T', 300);
+        let (contract, _) = deploy(admin, 'Token', 'T', 300);
 
         let not_admin = contract_address_const::<2>();
         set_contract_address(not_admin);
@@ -486,7 +491,7 @@ mod tests {
     #[should_panic]
     #[available_gas(2000000000)]
     fn test_mint_too_much() {
-        let contract = deploy(contract_address_const::<123>(), 'Token', 'T', 300);
+        let (contract, _) = deploy(contract_address_const::<123>(), 'Token', 'T', 300);
         contract.mint(get_contract_address(), 301);
     }
 }
