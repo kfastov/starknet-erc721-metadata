@@ -68,7 +68,7 @@ trait IERC721IPFSTemplate<TContractState> {
 mod ERC721IPFSTemplate {
     use starknet::ContractAddress;
     use openzeppelin::token::erc721::ERC721;
-    use alexandria_ascii::interger::ToAsciiTrait;
+    use alexandria_ascii::integer::ToAsciiTrait;
     use openzeppelin::access::ownable::Ownable as ownable_component;
 
     component!(path: ownable_component, storage: ownable, event: OwnableEvent);

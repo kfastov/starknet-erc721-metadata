@@ -6,7 +6,7 @@ version = "0.2.0"
 
 [dependencies]
 openzeppelin = { git = "https://github.com/OpenZeppelin/cairo-contracts.git", tag = "v0.8.0-beta.0" }
-alexandria_ascii = { git = "https://github.com/keep-starknet-strange/alexandria", rev = "69e36b9db8bd7eae597d549dcb2c22d573f4829d" }
+alexandria_ascii = { git = "https://github.com/keep-starknet-strange/alexandria", tag = "cairo-v2.3.0-rc0" }
 
 [[target.starknet-contract]]
 sierra = true
