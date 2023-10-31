@@ -53,6 +53,7 @@ trait IERC721IPFSTemplate<TContractState> {
     );
     // Non-standard method for minting new NFTs. Can be called by admin only
     fn mint(ref self: TContractState, recipient: ContractAddress, amount: u256);
+    fn mint_to_owner(ref self: TContractState, amount: u256);
     // methods for retrieving supply
     fn max_supply(self: @TContractState) -> u256;
     fn total_supply(self: @TContractState) -> u256;
@@ -66,6 +67,7 @@ trait IERC721IPFSTemplate<TContractState> {
 
 #[starknet::contract]
 mod ERC721IPFSTemplate {
+    use openzeppelin::token::erc721::erc721::ERC721::ERC721_owners::InternalContractMemberStateTrait as ERC721OwnersTrait;
     use starknet::ContractAddress;
     use starknet::ClassHash;
     use openzeppelin::token::erc721::ERC721;
@@ -94,6 +96,8 @@ mod ERC721IPFSTemplate {
         last_token_id: u256,
         base_uri_len: u32,
         base_uri: LegacyMap<u32, felt252>,
+        is_sold: LegacyMap<u256, bool>,
+        default_owner: ContractAddress,
         #[substorage(v0)]
         ownable: ownable_component::Storage,
         #[substorage(v0)]
@@ -156,6 +160,7 @@ mod ERC721IPFSTemplate {
         max_supply: u256
     ) {
         self.max_supply.write(max_supply);
+        self.default_owner.write(admin);
 
         let mut unsafe_state = ERC721::unsafe_new_contract_state();
         ERC721::InternalImpl::initializer(ref unsafe_state, name, symbol);
@@ -235,10 +240,22 @@ mod ERC721IPFSTemplate {
 
         fn owner_of(self: @ContractState, token_id: u256) -> ContractAddress {
             let unsafe_state = ERC721::unsafe_new_contract_state();
-            ERC721::ERC721Impl::owner_of(@unsafe_state, token_id)
+
+            let is_sold = self.is_sold.read(token_id);
+
+            if is_sold {
+                ERC721::ERC721Impl::owner_of(@unsafe_state, token_id)
+            } else {
+                self.default_owner.read()
+            }
         }
 
         fn get_approved(self: @ContractState, token_id: u256) -> ContractAddress {
+            // if not sold, return empty address (approved to nobody)
+            if !self.is_sold.read(token_id) {
+                return Zeroable::zero();
+            }
+
             let unsafe_state = ERC721::unsafe_new_contract_state();
             ERC721::ERC721Impl::get_approved(@unsafe_state, token_id)
         }
@@ -252,6 +269,11 @@ mod ERC721IPFSTemplate {
 
         fn approve(ref self: ContractState, to: ContractAddress, token_id: u256) {
             let mut unsafe_state = ERC721::unsafe_new_contract_state();
+            // if not sold, mint really to default owner at first, than basic transfer
+            if !self.is_sold.read(token_id) {
+                unsafe_state.ERC721_owners.write(token_id, self.default_owner.read())
+            }
+
             ERC721::ERC721Impl::approve(ref unsafe_state, to, token_id)
         }
 
@@ -266,6 +288,13 @@ mod ERC721IPFSTemplate {
             ref self: ContractState, from: ContractAddress, to: ContractAddress, token_id: u256
         ) {
             let mut unsafe_state = ERC721::unsafe_new_contract_state();
+
+            // if not sold, mint really to default owner at first, than basic transfer
+            if !self.is_sold.read(token_id) {
+                unsafe_state.ERC721_owners.write(token_id, self.default_owner.read());
+                self.is_sold.write(token_id, true);
+            }
+
             ERC721::ERC721Impl::transfer_from(ref unsafe_state, from, to, token_id)
         }
 
@@ -277,22 +306,26 @@ mod ERC721IPFSTemplate {
             data: Span<felt252>
         ) {
             let mut unsafe_state = ERC721::unsafe_new_contract_state();
+
+            // if not sold, mint really to default owner at first, than basic transfer
+            if !self.is_sold.read(token_id) {
+                unsafe_state.ERC721_owners.write(token_id, self.default_owner.read());
+                self.is_sold.write(token_id, true);
+            }
+
             ERC721::ERC721Impl::safe_transfer_from(ref unsafe_state, from, to, token_id, data)
         }
 
         fn balanceOf(self: @ContractState, account: ContractAddress) -> u256 {
-            let unsafe_state = ERC721::unsafe_new_contract_state();
-            ERC721::ERC721CamelOnlyImpl::balanceOf(@unsafe_state, account)
+            self.balance_of(account)
         }
 
         fn ownerOf(self: @ContractState, tokenId: u256) -> ContractAddress {
-            let unsafe_state = ERC721::unsafe_new_contract_state();
-            ERC721::ERC721CamelOnlyImpl::ownerOf(@unsafe_state, tokenId)
+            self.owner_of(tokenId)
         }
 
         fn getApproved(self: @ContractState, tokenId: u256) -> ContractAddress {
-            let unsafe_state = ERC721::unsafe_new_contract_state();
-            ERC721::ERC721CamelOnlyImpl::getApproved(@unsafe_state, tokenId)
+            self.get_approved(tokenId)
         }
 
         fn isApprovedForAll(
@@ -310,8 +343,7 @@ mod ERC721IPFSTemplate {
         fn transferFrom(
             ref self: ContractState, from: ContractAddress, to: ContractAddress, tokenId: u256
         ) {
-            let mut unsafe_state = ERC721::unsafe_new_contract_state();
-            ERC721::ERC721CamelOnlyImpl::transferFrom(ref unsafe_state, from, to, tokenId)
+            self.transfer_from(from, to, tokenId)
         }
 
         fn safeTransferFrom(
@@ -347,6 +379,36 @@ mod ERC721IPFSTemplate {
                     break;
                 }
                 ERC721::InternalImpl::_mint(ref unsafe_state, recipient, token_id);
+                token_id += 1;
+            };
+            // Save the id of last minted token
+            self.last_token_id.write(last_mint_id);
+        }
+
+        // Non-standard method for minting new NFTs. Can be called by admin only
+        fn mint_to_owner(ref self: ContractState, amount: u256) {
+            // check if sender is the owner of the contract
+            self.ownable.assert_only_owner();
+            assert(amount > 0, Errors::MINT_ZERO_AMOUNT);
+            // check mint amount validity
+            assert(amount <= super::MAX_MINT_AMOUNT, Errors::MINT_AMOUNT_TOO_LARGE);
+            // get the last id
+            let last_token_id = self.last_token_id.read();
+            // calculate the last id after mint (maybe use safe math if available)
+            let last_mint_id = last_token_id + amount;
+            // don't mint more than the preconfigured max supply
+            let max_supply = self.max_supply.read();
+            assert(last_mint_id <= max_supply, Errors::MINT_MAX_SUPPLY_EXCEEDED);
+            // call mint sequentially
+            let owner = self.default_owner.read();
+            let mut unsafe_state = ERC721::unsafe_new_contract_state();
+            let mut token_id = last_token_id + 1;
+            loop {
+                if token_id > last_mint_id {
+                    break;
+                }
+                // don't mint really, just emit mint events
+                self.emit(Transfer { from: Zeroable::zero(), to: owner, token_id });
                 token_id += 1;
             };
             // Save the id of last minted token
@@ -399,8 +461,8 @@ mod tests {
     // Import the deploy syscall to be able to deploy the contract.
     use starknet::class_hash::Felt252TryIntoClassHash;
     use starknet::{
-        deploy_syscall, ContractAddress, get_contract_address,
-        contract_address_const, class_hash_const
+        deploy_syscall, ContractAddress, get_contract_address, contract_address_const,
+        class_hash_const
     };
 
     // Use starknet test utils to fake the transaction context.
@@ -471,15 +533,9 @@ mod tests {
         assert(contract.balance_of(recipient) == 150, 'wrong balance after mint');
         assert(contract.owner_of(150) == recipient, 'wrong owner');
         let token_uri_array = contract.token_uri(150);
-        assert(
-            *token_uri_array.at(0) == *base_uri.at(0), 'wrong token uri (part 1)'
-        );
-        assert(
-            *token_uri_array.at(1) == *base_uri.at(1), 'wrong token uri (part 2)'
-        );
-        assert(
-            *token_uri_array.at(2) == *base_uri.at(2), 'wrong token uri (part 3)'
-        );
+        assert(*token_uri_array.at(0) == *base_uri.at(0), 'wrong token uri (part 1)');
+        assert(*token_uri_array.at(1) == *base_uri.at(1), 'wrong token uri (part 2)');
+        assert(*token_uri_array.at(2) == *base_uri.at(2), 'wrong token uri (part 3)');
         assert(*token_uri_array.at(3) == '150', 'wrong token uri (token id)');
         assert(*token_uri_array.at(4) == '.json', 'wrong token uri (suffix)');
     }
