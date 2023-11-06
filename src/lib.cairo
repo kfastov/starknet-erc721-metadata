@@ -63,11 +63,13 @@ trait IERC721IPFSTemplate<TContractState> {
     // method for setting base URI common for all tokens
     // TODO move this into constructor
     fn set_base_uri(ref self: TContractState, base_uri: Array<felt252>);
+    fn airdrop(ref self: TContractState, recipients: Array<ContractAddress>);
 }
 
 #[starknet::contract]
 mod ERC721IPFSTemplate {
     use openzeppelin::token::erc721::erc721::ERC721::ERC721_owners::InternalContractMemberStateTrait as ERC721OwnersTrait;
+    use openzeppelin::token::erc721::erc721::ERC721::ERC721_balances::InternalContractMemberStateTrait as ERC721BalancesTrait;
     use starknet::ContractAddress;
     use starknet::ClassHash;
     use openzeppelin::token::erc721::ERC721;
@@ -97,6 +99,7 @@ mod ERC721IPFSTemplate {
         base_uri_len: u32,
         base_uri: LegacyMap<u32, felt252>,
         is_sold: LegacyMap<u256, bool>,
+        unsold_quantity: u256,
         default_owner: ContractAddress,
         #[substorage(v0)]
         ownable: ownable_component::Storage,
@@ -116,9 +119,7 @@ mod ERC721IPFSTemplate {
         Transfer: Transfer,
         Approval: Approval,
         ApprovalForAll: ApprovalForAll,
-        #[flat]
         OwnableEvent: ownable_component::Event,
-        #[flat]
         UpgradeableEvent: upgradeable_component::Event,
     }
 
@@ -179,6 +180,20 @@ mod ERC721IPFSTemplate {
         }
     }
 
+    #[generate_trait]
+    impl ERC721IPFSTemplateInternalImpl of ERC721IPFSTemplateInternalTrait {
+        fn _spawn_owner_token(
+            ref self: ContractState, token_id: u256
+        ) {
+            let mut unsafe_state = ERC721::unsafe_new_contract_state();
+            let owner = self.default_owner.read();
+            unsafe_state.ERC721_owners.write(token_id, self.default_owner.read());
+            self.unsold_quantity.write(self.unsold_quantity.read() - 1);
+            unsafe_state.ERC721_balances.write(owner, unsafe_state.ERC721_balances.read(owner) + 1);
+            self.is_sold.write(token_id, true);
+        }
+    }
+
     #[external(v0)]
     impl ERC721IPFSTemplateImpl of super::IERC721IPFSTemplate<ContractState> {
         fn name(self: @ContractState) -> felt252 {
@@ -235,19 +250,22 @@ mod ERC721IPFSTemplate {
 
         fn balance_of(self: @ContractState, account: ContractAddress) -> u256 {
             let unsafe_state = ERC721::unsafe_new_contract_state();
-            ERC721::ERC721Impl::balance_of(@unsafe_state, account)
+            ERC721::ERC721Impl::balance_of(@unsafe_state, account) +
+                if account == self.default_owner.read() {
+                    self.unsold_quantity.read()
+                } else {
+                    0
+                }
         }
 
         fn owner_of(self: @ContractState, token_id: u256) -> ContractAddress {
             let unsafe_state = ERC721::unsafe_new_contract_state();
 
-            let is_sold = self.is_sold.read(token_id);
-
-            if is_sold {
-                ERC721::ERC721Impl::owner_of(@unsafe_state, token_id)
-            } else {
-                self.default_owner.read()
+            if !self.is_sold.read(token_id) {
+                return self.default_owner.read();
             }
+            
+            ERC721::ERC721Impl::owner_of(@unsafe_state, token_id)
         }
 
         fn get_approved(self: @ContractState, token_id: u256) -> ContractAddress {
@@ -271,7 +289,7 @@ mod ERC721IPFSTemplate {
             let mut unsafe_state = ERC721::unsafe_new_contract_state();
             // if not sold, mint really to default owner at first, than basic transfer
             if !self.is_sold.read(token_id) {
-                unsafe_state.ERC721_owners.write(token_id, self.default_owner.read())
+                self._spawn_owner_token(token_id);
             }
 
             ERC721::ERC721Impl::approve(ref unsafe_state, to, token_id)
@@ -291,8 +309,7 @@ mod ERC721IPFSTemplate {
 
             // if not sold, mint really to default owner at first, than basic transfer
             if !self.is_sold.read(token_id) {
-                unsafe_state.ERC721_owners.write(token_id, self.default_owner.read());
-                self.is_sold.write(token_id, true);
+                self._spawn_owner_token(token_id);
             }
 
             ERC721::ERC721Impl::transfer_from(ref unsafe_state, from, to, token_id)
@@ -309,8 +326,7 @@ mod ERC721IPFSTemplate {
 
             // if not sold, mint really to default owner at first, than basic transfer
             if !self.is_sold.read(token_id) {
-                unsafe_state.ERC721_owners.write(token_id, self.default_owner.read());
-                self.is_sold.write(token_id, true);
+                self._spawn_owner_token(token_id);
             }
 
             ERC721::ERC721Impl::safe_transfer_from(ref unsafe_state, from, to, token_id, data)
@@ -378,6 +394,7 @@ mod ERC721IPFSTemplate {
                 if token_id > last_mint_id {
                     break;
                 }
+                self.is_sold.write(token_id, true);
                 ERC721::InternalImpl::_mint(ref unsafe_state, recipient, token_id);
                 token_id += 1;
             };
@@ -413,6 +430,7 @@ mod ERC721IPFSTemplate {
             };
             // Save the id of last minted token
             self.last_token_id.write(last_mint_id);
+            self.unsold_quantity.write(self.unsold_quantity.read() + amount);
         }
 
         fn max_supply(self: @ContractState) -> u256 {
@@ -446,13 +464,46 @@ mod ERC721IPFSTemplate {
                 i += 1;
             }
         }
+        fn airdrop(ref self: ContractState, recipients: Array<ContractAddress>) {
+            self.ownable.assert_only_owner();
+            // get the count of recipients
+            let len = recipients.len();
+            // get the last id
+            let last_token_id = self.last_token_id.read();
+            // calculate the last id after mint
+            let last_mint_id = last_token_id + len.into();
+            // don't mint more than the preconfigured max supply
+            let max_supply = self.max_supply.read();
+            assert(last_mint_id <= max_supply, Errors::MINT_MAX_SUPPLY_EXCEEDED);
+
+            // get the ERC721 state for calling mint method
+            let mut unsafe_state = ERC721::unsafe_new_contract_state();
+
+            // iterate through all receivers and call mint
+            let mut index = 0;
+            loop {
+                if index >= len {
+                    break;
+                }
+
+                let recipient = *recipients.at(index);
+                let token_id = last_token_id + 1 + index.into();
+                ERC721::InternalImpl::_mint(ref unsafe_state, recipient, token_id);
+                self.is_sold.write(token_id, true);
+                index += 1;
+            };
+            // 
+            // Save the id of last minted token
+            self.last_token_id.write(last_mint_id);
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     // Import the interface and dispatcher to be able to interact with the contract.
-    use super::{
+    use core::clone::Clone;
+use super::{
         ERC721IPFSTemplate, IERC721IPFSTemplateDispatcher, IERC721IPFSTemplateDispatcherTrait
     };
     use openzeppelin::access::ownable::interface::{IOwnableDispatcher, IOwnableDispatcherTrait};
@@ -550,6 +601,59 @@ mod tests {
 
         let recipient = contract_address_const::<1>();
         contract.mint(recipient, 300);
+    }
+
+    #[test]
+    #[available_gas(2000000000)]
+    fn test_can_transfer() {
+        let owner = contract_address_const::<123>();
+        let operator = contract_address_const::<456>();
+        let recipient = contract_address_const::<789>();
+
+        set_contract_address(owner);
+        let (contract, _, _) = deploy(owner, 'Token', 'T', 300);
+
+        // 1 - mint some tokens to owner
+        contract.mint_to_owner(300);
+        assert(contract.owner_of(123) == owner, 'wrong owner');
+
+        // 2 - approve to operator
+        contract.approve(operator, 123);
+        assert(contract.get_approved(123) == operator, 'wrong operator');
+
+        // 3 - transfer by operator to recipient
+        set_contract_address(operator);
+        contract.transfer_from(owner, recipient, 123);
+        assert(contract.owner_of(123) == recipient, 'wrong owner');
+    }
+
+    #[test]
+    #[available_gas(2000000000)]
+    fn test_airdrop() {
+        let recipients = array![
+            contract_address_const::<1>(),
+            contract_address_const::<2>(),
+            contract_address_const::<3>(),
+        ];
+
+        let owner = contract_address_const::<4>();
+
+        set_contract_address(owner);
+
+        let (contract, _, _) = deploy(owner, 'Token', 'T', 300);
+
+        // 1 - mint some tokens to owner
+        contract.airdrop(recipients.clone());
+
+        // 2 - check balances
+        assert(contract.balance_of(*recipients.at(0)) == 1, 'wrong balance 1');
+        assert(contract.balance_of(*recipients.at(1)) == 1, 'wrong balance 1');
+        assert(contract.balance_of(*recipients.at(2)) == 1, 'wrong balance 1');
+
+        // 3 - check ownership
+        assert(contract.owner_of(1) == *recipients.at(0), 'wrong owner 1');
+        assert(contract.owner_of(2) == *recipients.at(1), 'wrong owner 2');
+        assert(contract.owner_of(3) == *recipients.at(2), 'wrong owner 3');
     }
 
     #[test]
